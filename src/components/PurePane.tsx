@@ -10,7 +10,7 @@ import type { FavoriteItem, FavGroup, HistoryItem, ImageParams } from "@/lib/typ
 import { afterPaint, generateNai, genPhaseLabel, imageFailText } from "@/lib/engine";
 import { autoScrollNearEdge, downloadBlob, indexFromY, moveId, nearestScroller, randomSeed, sortHistoryNewestFirst, uid } from "@/lib/utils";
 import { ParamsPane } from "./ParamsPane";
-import { ImagePick } from "./ImagePick";
+import { ImagePick, type StoredPick } from "./ImagePick";
 import { IconBtn, PrimaryBtn, TextArea, TextInput, useCooldown } from "./ui-kit";
 
 const HOLD_MS = 400;
@@ -1348,6 +1348,13 @@ function PureParamsSheet({ onClose }: { onClose: () => void }) {
 function ReadMeta() {
   return (
     <ImagePick
+      onStored={(pick: StoredPick) => {
+        const next = structuredClone(pick.params);
+        if (pick.seed != null) next.seed = pick.seed;
+        next.seedLocked = false;
+        applyPureParams(next);
+        useApp.getState().toast("已应用参数");
+      }}
       onFile={async (file) => {
         try {
           const meta = parseNaiPng(await file.arrayBuffer());

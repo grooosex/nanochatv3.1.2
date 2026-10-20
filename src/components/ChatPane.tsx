@@ -14,7 +14,7 @@ import {
   Wand2,
   X,
 } from "lucide-react";
-import { imageUrl } from "@/lib/idb";
+import { getImage, imageUrl } from "@/lib/idb";
 import { compressRef } from "@/lib/ref-image";
 import { modelLabel, samplerLabel } from "@/lib/nai";
 import { extractGrokTail } from "@/lib/nai-tags";
@@ -317,6 +317,15 @@ export function ChatPane({ chat }: { chat: Chat }) {
                 const id = await saveBlob(blob);
                 useApp.getState().setComposerShot(chat.id, { blobId: id, i2i: false });
               });
+            }}
+            onBlob={async (blobId) => {
+              const blob = await getImage(blobId);
+              if (!blob) {
+                useApp.getState().toast("这张图已经不在了");
+                return;
+              }
+              const id = await saveBlob(blob);
+              useApp.getState().setComposerShot(chat.id, { blobId: id, i2i: false });
             }}
             render={(open) => (
               <button

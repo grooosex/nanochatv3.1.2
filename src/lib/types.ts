@@ -172,6 +172,7 @@ export interface Chat {
   imageParams: ImageParams;
   messages: ChatMessage[];
   avatarBlobId?: string;
+  customAvatarBlobId?: string;
   scrollTop: number;
   /** @deprecated lifted into Settings.imageModelId */
   imageModelId?: string | null;

@@ -3,6 +3,16 @@ import assert from "node:assert/strict";
 import { firstChatImageBlob } from "./chat-avatar.ts";
 
 describe("firstChatImageBlob", () => {
+  it("prefers a custom avatar over the saved one", () => {
+    assert.equal(
+      firstChatImageBlob({
+        customAvatarBlobId: "custom",
+        avatarBlobId: "av",
+        messages: [{ images: [{ status: "done", blobId: "img1" }] }],
+      }),
+      "custom",
+    );
+  });
   it("prefers the saved avatar", () => {
     assert.equal(
       firstChatImageBlob({

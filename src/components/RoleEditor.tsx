@@ -1,12 +1,13 @@
-import { useState, useEffect, useRef, type ReactNode } from "react";
-import { ChevronDown, ChevronUp, Check, Download, Loader2, Plus, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
+import { useState, useEffect, useRef, type ReactNode, type PointerEvent as PE } from "react";
+import { createPortal } from "react-dom";
+import { ChevronDown, ChevronLeft, ChevronUp, Check, Download, Loader2, Plus, RefreshCw, Sparkles, Trash2, X } from "lucide-react";
 import { DEFAULT_STATUS_BAR, PLACEHOLDERS, emptyCharacter } from "@/lib/constants";
 import { polishAll, polishField, foldWindow } from "@/lib/engine";
 import { FIELD_LABELS } from "@/lib/prompts";
 import { applyRoleField, mergePolish } from "@/lib/role-polish";
 import { useApp, saveBlob } from "@/lib/store";
 import { compressRef } from "@/lib/ref-image";
-import { imageUrl } from "@/lib/idb";
+import { getImage, imageUrl } from "@/lib/idb";
 import { syncCharsFromRole } from "@/lib/nai";
 import type { Chat, ExtraField } from "@/lib/types";
 import { uid } from "@/lib/utils";
@@ -279,6 +280,11 @@ export function RoleEditor({ chat, mode }: { chat: Chat; mode: "create" | "edit"
       <Card className="mb-3">
         <FieldLabel>AI 版本</FieldLabel>
         <ChatModelSelect align="left" className="w-full rounded-full border border-line bg-card" />
+        <CustomAvatar
+          blobId={chat.customAvatarBlobId}
+          onId={(id) => patch({ customAvatarBlobId: id })}
+          onClear={() => patch({ customAvatarBlobId: "" })}
+        />
       </Card>
 
       {!chat.isMulti && nameBlock}
@@ -353,6 +359,17 @@ export function RoleEditor({ chat, mode }: { chat: Chat; mode: "create" | "edit"
             blobId={char.lookBlobId}
             onPick={async (file) => {
               const blob = await compressRef(file, 768, 0.82);
+              const id = await saveBlob(blob);
+              patch({
+                characters: chat.characters.map((c) => (c.id === char.id ? { ...c, lookBlobId: id } : c)),
+              });
+            }}
+            onBlob={async (blobId) => {
+              const blob = await getImage(blobId);
+              if (!blob) {
+                useApp.getState().toast("这张图已经不在了");
+                return;
+              }
               const id = await saveBlob(blob);
               patch({
                 characters: chat.characters.map((c) => (c.id === char.id ? { ...c, lookBlobId: id } : c)),
@@ -707,13 +724,335 @@ function FieldBlock({
   );
 }
 
+function clampCrop(
+  scale: number,
+  ox: number,
+  oy: number,
+  sMin: number,
+  sMax: number,
+  diameter: number,
+  natW: number,
+  natH: number,
+) {
+  const s = Math.min(sMax, Math.max(sMin, scale));
+  const limX = Math.max(0, (natW * s - diameter) / 2);
+  const limY = Math.max(0, (natH * s - diameter) / 2);
+  return {
+    scale: s,
+    ox: Math.min(limX, Math.max(-limX, ox)),
+    oy: Math.min(limY, Math.max(-limY, oy)),
+  };
+}
+
+function AvatarCrop({ src, onCancel, onDone }: { src: string; onCancel: () => void; onDone: (blob: Blob) => void }) {
+  const stageRef = useRef<HTMLDivElement>(null);
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [nat, setNat] = useState({ w: 0, h: 0 });
+  const [view, setView] = useState<{ scale: number; ox: number; oy: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const gesture = useRef<{ ox: number; oy: number; scale: number; x: number; y: number; dist: number; mx: number; my: number } | null>(null);
+
+  const diameter = Math.min(box.w, box.h) * 0.78;
+  const ready = nat.w > 0 && diameter > 0;
+  const sMin = ready ? Math.max(diameter / nat.w, diameter / nat.h) : 1;
+  const sMax = sMin * 4;
+  const shown = view ?? { scale: sMin, ox: 0, oy: 0 };
+  const viewRef = useRef(shown);
+  viewRef.current = shown;
+  const geo = useRef({ sMin, sMax, diameter, natW: nat.w, natH: nat.h });
+  geo.current = { sMin, sMax, diameter, natW: nat.w, natH: nat.h };
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const measure = () => setBox({ w: el.clientWidth, h: el.clientHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  useEffect(() => {
+    setView((v) => {
+      const g = geo.current;
+      if (!v || !g.natW || !g.diameter) return v;
+      const next = clampCrop(v.scale, v.ox, v.oy, g.sMin, g.sMax, g.diameter, g.natW, g.natH);
+      if (next.scale === v.scale && next.ox === v.ox && next.oy === v.oy) return v;
+      viewRef.current = next;
+      return next;
+    });
+  }, [box.w, box.h, nat.w, nat.h]);
+
+  const apply = (scale: number, ox: number, oy: number) => {
+    const g = geo.current;
+    const next = clampCrop(scale, ox, oy, g.sMin, g.sMax, g.diameter, g.natW, g.natH);
+    viewRef.current = next;
+    setView(next);
+  };
+
+  const begin = () => {
+    const pts = [...pointers.current.values()];
+    const v = viewRef.current;
+    if (pts.length >= 2) {
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      gesture.current = {
+        ox: v.ox,
+        oy: v.oy,
+        scale: v.scale,
+        x: 0,
+        y: 0,
+        dist,
+        mx: (pts[0].x + pts[1].x) / 2,
+        my: (pts[0].y + pts[1].y) / 2,
+      };
+    } else if (pts.length === 1) {
+      gesture.current = { ox: v.ox, oy: v.oy, scale: v.scale, x: pts[0].x, y: pts[0].y, dist: 0, mx: pts[0].x, my: pts[0].y };
+    } else {
+      gesture.current = null;
+    }
+  };
+
+  const onPointerDown = (e: PE<HTMLDivElement>) => {
+    if (!ready) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    begin();
+  };
+
+  const onPointerMove = (e: PE<HTMLDivElement>) => {
+    if (!pointers.current.has(e.pointerId)) return;
+    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const g = gesture.current;
+    if (!g) return;
+    const pts = [...pointers.current.values()];
+    if (pts.length >= 2) {
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+      const mx = (pts[0].x + pts[1].x) / 2;
+      const my = (pts[0].y + pts[1].y) / 2;
+      const scale = g.scale * (dist / g.dist);
+      const k = scale / g.scale;
+      apply(scale, g.ox * k + (mx - g.mx), g.oy * k + (my - g.my));
+    } else {
+      apply(g.scale, g.ox + (e.clientX - g.x), g.oy + (e.clientY - g.y));
+    }
+  };
+
+  const onPointerUp = (e: PE<HTMLDivElement>) => {
+    pointers.current.delete(e.pointerId);
+    begin();
+  };
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (!geo.current.natW) return;
+      e.preventDefault();
+      const v = viewRef.current;
+      const factor = e.deltaY < 0 ? 1.06 : 1 / 1.06;
+      const g = geo.current;
+      const next = clampCrop(v.scale * factor, v.ox * factor, v.oy * factor, g.sMin, g.sMax, g.diameter, g.natW, g.natH);
+      viewRef.current = next;
+      setView(next);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const finish = () => {
+    const img = imgRef.current;
+    const g = geo.current;
+    if (!img || !g.natW || !g.diameter || busy) return;
+    setBusy(true);
+    const { scale, ox, oy } = viewRef.current;
+    const dw = g.natW * scale;
+    const dh = g.natH * scale;
+    const sw = g.diameter / scale;
+    const sh = g.diameter / scale;
+    const sx = Math.max(0, Math.min(g.natW - sw, ((dw - g.diameter) / 2 - ox) / scale));
+    const sy = Math.max(0, Math.min(g.natH - sh, ((dh - g.diameter) / 2 - oy) / scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+      setBusy(false);
+      return;
+    }
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, 512, 512);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        setBusy(false);
+        return;
+      }
+      onDone(blob);
+    }, "image/jpeg", 0.9);
+  };
+
+  const dw = nat.w * shown.scale;
+  const dh = nat.h * shown.scale;
+  const cx = box.w / 2;
+  const cy = box.h / 2;
+
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex flex-col bg-black text-white">
+      <div className="flex shrink-0 items-center px-1 pt-[max(8px,env(safe-area-inset-top))]">
+        <button type="button" className="grid size-11 place-items-center" aria-label="返回" onClick={onCancel}>
+          <ChevronLeft className="size-6" />
+        </button>
+        <div className="flex-1 text-center text-[16px]">移动和缩放</div>
+        <div className="size-11" />
+      </div>
+      <div
+        ref={stageRef}
+        className="relative min-h-0 flex-1 touch-none overflow-hidden"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      >
+        <img
+          ref={imgRef}
+          src={src}
+          alt=""
+          draggable={false}
+          onLoad={(e) => setNat({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+          onError={onCancel}
+          className="absolute max-w-none select-none"
+          style={{
+            width: dw || undefined,
+            height: dh || undefined,
+            left: cx + shown.ox - dw / 2,
+            top: cy + shown.oy - dh / 2,
+            opacity: ready ? 1 : 0,
+          }}
+        />
+        {ready ? (
+          <div
+            className="pointer-events-none absolute rounded-full border border-white/90"
+            style={{
+              width: diameter,
+              height: diameter,
+              left: cx - diameter / 2,
+              top: cy - diameter / 2,
+              boxShadow: "0 0 0 9999px rgba(0,0,0,0.55)",
+            }}
+          />
+        ) : null}
+      </div>
+      <div className="flex shrink-0 justify-end px-4 pb-[max(16px,env(safe-area-inset-bottom))] pt-3">
+        <button
+          type="button"
+          className="rounded-full bg-primary px-6 py-2 text-[15px] text-on-primary disabled:opacity-40"
+          disabled={!ready || busy}
+          onClick={finish}
+        >
+          完成
+        </button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+function CustomAvatar({
+  blobId,
+  onId,
+  onClear,
+}: {
+  blobId?: string;
+  onId: (id: string) => void;
+  onClear: () => void;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [crop, setCrop] = useState<string | null>(null);
+  useEffect(() => {
+    if (!blobId) {
+      setUrl(null);
+      return;
+    }
+    let dead = false;
+    void imageUrl(blobId).then((u) => {
+      if (!dead) setUrl(u);
+    });
+    return () => {
+      dead = true;
+    };
+  }, [blobId]);
+  useEffect(() => {
+    return () => {
+      if (crop) URL.revokeObjectURL(crop);
+    };
+  }, [crop]);
+  const openCrop = (blob: Blob) => {
+    setCrop((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return URL.createObjectURL(blob);
+    });
+  };
+  return (
+    <div className="mt-3 flex items-center gap-2">
+      {url ? (
+        <div className="relative">
+          <ZoomImg src={url} className="size-16 rounded-full object-cover" />
+          <button
+            type="button"
+            className="absolute -right-1 -top-1 z-10 grid size-5 place-items-center rounded-full bg-card text-ink"
+            aria-label="去掉自定义头像"
+            onClick={onClear}
+          >
+            <X className="size-3" />
+          </button>
+        </div>
+      ) : (
+        <ImagePick
+          onFile={(file) => openCrop(file)}
+          onBlob={async (id) => {
+            const blob = await getImage(id);
+            if (!blob) {
+              useApp.getState().toast("这张图已经不在了");
+              return;
+            }
+            openCrop(blob);
+          }}
+          render={(open) => (
+            <button
+              type="button"
+              className="grid size-9 place-items-center rounded-full border border-line text-muted"
+              aria-label="上传自定义头像"
+              onClick={open}
+            >
+              <Plus className="size-4" />
+            </button>
+          )}
+        />
+      )}
+      <span className="text-[12px] text-muted">自定义头像。不上传就用第一张生成的图</span>
+      {crop ? (
+        <AvatarCrop
+          src={crop}
+          onCancel={() => setCrop(null)}
+          onDone={(blob) => {
+            void saveBlob(blob).then(onId);
+            setCrop(null);
+          }}
+        />
+      ) : null}
+    </div>
+  );
+}
+
 function LookRef({
   blobId,
   onPick,
+  onBlob,
   onClear,
 }: {
   blobId?: string;
   onPick: (file: File) => void;
+  onBlob: (blobId: string) => void | Promise<void>;
   onClear: () => void;
 }) {
   const [url, setUrl] = useState<string | null>(null);
@@ -747,6 +1086,7 @@ function LookRef({
       ) : (
         <ImagePick
           onFile={onPick}
+          onBlob={onBlob}
           render={(open) => (
             <button
               type="button"

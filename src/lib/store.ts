@@ -1092,6 +1092,7 @@ function blobInUse(s: State, blobId: string, skipFav?: string) {
   if (s.cards.some((card) => card.characters.some((c) => c.lookBlobId === blobId))) return true;
   for (const c of s.chats) {
     if (c.avatarBlobId === blobId) return true;
+    if (c.customAvatarBlobId === blobId) return true;
     if (c.imageParams.img2imgBlobId === blobId) return true;
     if (c.characters.some((ch) => ch.lookBlobId === blobId)) return true;
     for (const m of c.messages) {

@@ -11,7 +11,7 @@ import {
 import { applyBackFlags, applyFrontFlags, applyMergedFlags } from "@/lib/prompt-flags";
 import { listedChats, saveBlob, useApp } from "@/lib/store";
 import { compressRef, isImageFile, naiSeedOf } from "@/lib/ref-image";
-import { imageUrl } from "@/lib/idb";
+import { getImage, imageUrl } from "@/lib/idb";
 import { insertTag, loadTags, suggestTags, type Tag } from "@/lib/tags";
 import { naiFamily } from "@/lib/nai";
 import { replyStoryText } from "@/lib/reply-markup";
@@ -336,6 +336,18 @@ export function ParamsPane({ chat, mode = "chat" }: { chat: Chat; mode?: "chat" 
           if (p.img2imgStrength == null) next.img2imgStrength = 0.7;
           if (p.img2imgNoise == null) next.img2imgNoise = 0;
           if (seed != null) next.seed = seed;
+          commit(next);
+        }}
+        onBlob={async (blobId) => {
+          const blob = await getImage(blobId);
+          if (!blob) {
+            useApp.getState().toast("这张图已经不在了");
+            return;
+          }
+          const id = await saveBlob(blob);
+          const next: Partial<ImageParams> = { img2imgBlobId: id };
+          if (p.img2imgStrength == null) next.img2imgStrength = 0.7;
+          if (p.img2imgNoise == null) next.img2imgNoise = 0;
           commit(next);
         }}
         onClear={() => commit({ img2imgBlobId: "" })}
@@ -899,6 +911,7 @@ function Img2ImgBox({
   strength,
   noise,
   onFile,
+  onBlob,
   onClear,
   onStrength,
   onNoise,
@@ -907,6 +920,7 @@ function Img2ImgBox({
   strength: number;
   noise: number;
   onFile: (file: File) => void;
+  onBlob: (blobId: string) => void | Promise<void>;
   onClear: () => void;
   onStrength: (n: number) => void;
   onNoise: (n: number) => void;
@@ -965,6 +979,7 @@ function Img2ImgBox({
       ) : (
         <ImagePick
           onFile={onFile}
+          onBlob={onBlob}
           render={(open) => (
             <button
               type="button"

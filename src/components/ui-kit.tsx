@@ -507,7 +507,7 @@ export function ChatAvatar({
   size,
   dim,
 }: {
-  chat: { name: string; avatarBlobId?: string; messages: ChatMessage[] };
+  chat: { name: string; customAvatarBlobId?: string; avatarBlobId?: string; messages: ChatMessage[] };
   name?: string;
   size?: number;
   dim?: boolean;
